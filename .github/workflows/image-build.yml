@@ -1,0 +1,54 @@
+name: Image build
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+  push:
+    branches:
+      - image/**
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    name: Build and push linux/amd64 image to ghcr.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: './.nvmrc'
+      - name: Build UI assets
+        run: |
+          make -C ui/app build
+          make -C ui/mantine-ui assets
+          make template/email.tmpl
+      - name: Build binaries
+        run: |
+          VERSION="$(cat VERSION)"
+          REVISION="$(git rev-parse HEAD)"
+          LDFLAGS="-X github.com/prometheus/common/version.Version=${VERSION} \
+            -X github.com/prometheus/common/version.Revision=${REVISION} \
+            -X github.com/prometheus/common/version.Branch=${GITHUB_REF_NAME}"
+          mkdir -p .build/linux-amd64
+          for cmd in alertmanager amtool; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -tags netgo \
+              -ldflags "${LDFLAGS}" -o ".build/linux-amd64/${cmd}" "./cmd/${cmd}"
+          done
+      - name: Build and push image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          IMAGE="ghcr.io/${OWNER,,}/alertmanager"
+          TAG="$(cat VERSION)-ui-fix-${GITHUB_SHA::8}"
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${ACTOR}" --password-stdin
+          docker build -t "${IMAGE}:${TAG}" -t "${IMAGE}:ui-dropdown-fix" .
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:ui-dropdown-fix"
+          echo "Pushed ${IMAGE}:${TAG}" >> "$GITHUB_STEP_SUMMARY"
